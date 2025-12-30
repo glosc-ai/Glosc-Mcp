@@ -1,0 +1,45 @@
+{
+  "name": "glosc-mcp",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "glosc": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/glosc-ai/Glosc-Mcp.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "files": [
+    "build"
+  ],
+  "bugs": {
+    "url": "https://github.com/glosc-ai/Glosc-Mcp/issues"
+  },
+  "homepage": "https://github.com/glosc-ai/Glosc-Mcp#readme",
+  "description": "",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "adm-zip": "^0.5.16",
+    "cheerio": "^1.1.2",
+    "csv-parser": "^3.2.0",
+    "mammoth": "^1.11.0",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.57.0",
+    "sharp": "^0.34.5",
+    "xlsx": "^0.18.5",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@types/adm-zip": "^0.5.7",
+    "@types/node": "^25.0.3",
+    "typescript": "^5.9.3"
+  }
+}
