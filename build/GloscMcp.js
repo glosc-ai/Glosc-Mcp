@@ -100,6 +100,101 @@ export class GloscMcp {
                 };
             }
         });
+        this.server.registerTool("listApps", {
+            description: "获取已安装应用列表（Windows 注册表）",
+            inputSchema: z.object({
+                query: z.string().describe("按名称过滤（可选）").optional(),
+                matchMode: z
+                    .enum(["contains", "equals", "regex"])
+                    .describe("匹配模式")
+                    .default("contains"),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(5000)
+                    .describe("最多返回多少条")
+                    .default(200),
+            }),
+        }, async ({ query, matchMode, limit }) => {
+            const apps = await GloscTools.listInstalledApps({
+                query,
+                matchMode,
+                limit,
+            });
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(apps, null, 2),
+                    },
+                ],
+            };
+        });
+        this.server.registerTool("getAppInstallPath", {
+            description: "获取应用安装路径（优先 InstallLocation，其次推断）",
+            inputSchema: z.object({
+                name: z.string().describe("应用名称（支持模糊/正则）"),
+                matchMode: z
+                    .enum(["contains", "equals", "regex"])
+                    .describe("匹配模式")
+                    .default("contains"),
+                allMatches: z
+                    .boolean()
+                    .describe("是否返回全部候选")
+                    .default(false),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(500)
+                    .describe("候选上限")
+                    .default(50),
+            }),
+        }, async ({ name, matchMode, allMatches, limit }) => {
+            const result = await GloscTools.getAppInstallPath({
+                name,
+                matchMode,
+                allMatches,
+                limit,
+            });
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(result, null, 2),
+                    },
+                ],
+            };
+        });
+        this.server.registerTool("openRef", {
+            description: "打开引用（文件/文件夹/URL/可执行文件），使用系统默认方式打开",
+            inputSchema: z.object({
+                target: z.string().describe("要打开的目标：路径或 URL"),
+                args: z
+                    .array(z.string())
+                    .describe("当 target 是可执行文件时的参数")
+                    .optional(),
+                wait: z
+                    .boolean()
+                    .describe("是否等待进程退出")
+                    .default(false),
+            }),
+        }, async ({ target, args, wait }) => {
+            const res = await GloscTools.openReference({
+                target,
+                args,
+                wait,
+            });
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: JSON.stringify(res, null, 2),
+                    },
+                ],
+            };
+        });
     }
     /**
      * 注册资源

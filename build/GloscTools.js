@@ -10,6 +10,264 @@ import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import iconv from "iconv-lite";
 export class GloscTools {
+    static escapePowerShellSingleQuoted(value) {
+        return `'${value.replace(/'/g, "''")}'`;
+    }
+    static extractJsonFromOutput(output) {
+        const trimmed = output.trim();
+        if (!trimmed)
+            return null;
+        const firstBrace = trimmed.indexOf("{");
+        const firstBracket = trimmed.indexOf("[");
+        const startCandidates = [firstBrace, firstBracket].filter((n) => n >= 0);
+        if (startCandidates.length === 0)
+            return null;
+        const start = Math.min(...startCandidates);
+        const lastBrace = trimmed.lastIndexOf("}");
+        const lastBracket = trimmed.lastIndexOf("]");
+        const endCandidates = [lastBrace, lastBracket].filter((n) => n >= 0);
+        if (endCandidates.length === 0)
+            return null;
+        const end = Math.max(...endCandidates);
+        if (end <= start)
+            return null;
+        return trimmed.slice(start, end + 1);
+    }
+    static async listInstalledApps(options) {
+        if (process.platform !== "win32") {
+            throw new Error("当前仅支持 Windows：通过注册表获取已安装应用列表");
+        }
+        const query = options?.query?.trim();
+        const matchMode = options?.matchMode ?? "contains";
+        const limit = options?.limit ?? 200;
+        const psScript = `
+$ErrorActionPreference = 'SilentlyContinue'
+$paths = @(
+  'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+  'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*',
+  'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'
+)
+
+$apps = foreach ($p in $paths) {
+  Get-ItemProperty -Path $p | Where-Object { $_.DisplayName -and $_.DisplayName.Trim().Length -gt 0 } | ForEach-Object {
+    [PSCustomObject]@{
+      Name = $_.DisplayName
+      Version = $_.DisplayVersion
+      Publisher = $_.Publisher
+      InstallLocation = $_.InstallLocation
+      InstallSource = $_.InstallSource
+      DisplayIcon = $_.DisplayIcon
+      UninstallString = $_.UninstallString
+      QuietUninstallString = $_.QuietUninstallString
+      RegistryKey = $_.PSPath
+    }
+  }
+}
+
+$apps = $apps | Sort-Object Name, Version, Publisher -Unique
+
+if ($null -ne $apps) {
+  $apps | ConvertTo-Json -Depth 4
+}
+`;
+        const res = await GloscTools.spawnCommand("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", psScript], "utf8");
+        const jsonText = GloscTools.extractJsonFromOutput(res.output) ?? "[]";
+        let apps;
+        try {
+            const parsed = JSON.parse(jsonText);
+            apps = Array.isArray(parsed) ? parsed : [parsed];
+        }
+        catch (e) {
+            throw new Error(`解析应用列表失败: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        const normalizedApps = apps
+            .filter((a) => a && typeof a.Name === "string")
+            .map((a) => ({
+            name: String(a.Name),
+            version: a.Version ? String(a.Version) : undefined,
+            publisher: a.Publisher ? String(a.Publisher) : undefined,
+            installLocation: a.InstallLocation
+                ? String(a.InstallLocation)
+                : undefined,
+            installSource: a.InstallSource
+                ? String(a.InstallSource)
+                : undefined,
+            displayIcon: a.DisplayIcon ? String(a.DisplayIcon) : undefined,
+            uninstallString: a.UninstallString
+                ? String(a.UninstallString)
+                : undefined,
+            quietUninstallString: a.QuietUninstallString
+                ? String(a.QuietUninstallString)
+                : undefined,
+            registryKey: a.RegistryKey ? String(a.RegistryKey) : undefined,
+        }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+        const filtered = query
+            ? GloscTools.filterApps(normalizedApps, query, matchMode)
+            : normalizedApps;
+        return filtered.slice(0, Math.max(1, limit));
+    }
+    static filterApps(apps, query, matchMode) {
+        const q = query.trim();
+        if (!q)
+            return apps;
+        if (matchMode === "regex") {
+            let re;
+            try {
+                re = new RegExp(q, "i");
+            }
+            catch {
+                return [];
+            }
+            return apps.filter((a) => re.test(a.name));
+        }
+        const nq = q.toLowerCase();
+        const matches = apps.filter((a) => {
+            const n = a.name.toLowerCase();
+            if (matchMode === "equals")
+                return n === nq;
+            return n.includes(nq);
+        });
+        return matches.sort((a, b) => GloscTools.matchScore(a.name, q) -
+            GloscTools.matchScore(b.name, q));
+    }
+    static matchScore(name, query) {
+        const n = name.toLowerCase();
+        const q = query.toLowerCase();
+        if (n === q)
+            return 0;
+        if (n.startsWith(q))
+            return 1;
+        if (n.includes(q))
+            return 2;
+        return 3;
+    }
+    static inferInstallPathFromApp(app) {
+        const loc = app.installLocation?.trim();
+        if (loc) {
+            return { installPath: loc, source: "InstallLocation", raw: loc };
+        }
+        const fromDisplayIcon = GloscTools.extractPathFromCommandLike(app.displayIcon);
+        if (fromDisplayIcon) {
+            const dir = path.dirname(fromDisplayIcon);
+            return {
+                installPath: dir,
+                source: "DisplayIcon",
+                raw: app.displayIcon,
+            };
+        }
+        const fromUninstall = GloscTools.extractPathFromCommandLike(app.quietUninstallString ?? app.uninstallString);
+        if (fromUninstall) {
+            const dir = path.dirname(fromUninstall);
+            return {
+                installPath: dir,
+                source: "UninstallString",
+                raw: app.quietUninstallString ?? app.uninstallString,
+            };
+        }
+        return {};
+    }
+    static extractPathFromCommandLike(value) {
+        if (!value)
+            return null;
+        let v = value.trim();
+        if (!v)
+            return null;
+        // DisplayIcon 常见格式: "C:\\Path\\app.exe",0
+        const commaIndex = v.indexOf(",");
+        if (commaIndex > 0)
+            v = v.slice(0, commaIndex);
+        // 去掉外层引号
+        if ((v.startsWith('"') && v.endsWith('"')) ||
+            (v.startsWith("'") && v.endsWith("'"))) {
+            v = v.slice(1, -1);
+        }
+        // 若像命令行: "C:\\a b\\c.exe" /S
+        const quotedMatch = v.match(/^"([^"]+)"/);
+        if (quotedMatch?.[1])
+            return quotedMatch[1];
+        const firstToken = v.split(/\s+/)[0];
+        if (!firstToken)
+            return null;
+        return firstToken;
+    }
+    static async getAppInstallPath(options) {
+        const query = options.name;
+        const matchMode = options.matchMode ?? "contains";
+        const limit = options.limit ?? 50;
+        const apps = await GloscTools.listInstalledApps({
+            query,
+            matchMode,
+            limit,
+        });
+        const candidates = apps.map((a) => {
+            const inferred = GloscTools.inferInstallPathFromApp({
+                installLocation: a.installLocation,
+                displayIcon: a.displayIcon,
+                uninstallString: a.uninstallString,
+                quietUninstallString: a.quietUninstallString,
+            });
+            return {
+                name: a.name,
+                version: a.version,
+                publisher: a.publisher,
+                installLocation: a.installLocation,
+                inferredInstallPath: inferred.installPath,
+                inferredSource: inferred.source,
+            };
+        });
+        const best = candidates[0];
+        return {
+            query,
+            matchMode,
+            result: !options.allMatches && best
+                ? {
+                    name: best.name,
+                    installPath: best.installLocation ?? best.inferredInstallPath,
+                    source: best.installLocation
+                        ? "InstallLocation"
+                        : best.inferredSource,
+                    version: best.version,
+                    publisher: best.publisher,
+                }
+                : undefined,
+            candidates: options.allMatches
+                ? candidates
+                : candidates.slice(0, 10),
+        };
+    }
+    static async openReference(options) {
+        const target = options.target?.trim();
+        if (!target)
+            throw new Error("target 不能为空");
+        const wait = options.wait ?? false;
+        const args = options.args ?? [];
+        if (process.platform === "win32") {
+            const filePath = GloscTools.escapePowerShellSingleQuoted(target);
+            const argList = args.length > 0
+                ? ` -ArgumentList @(${args
+                    .map((a) => GloscTools.escapePowerShellSingleQuoted(a))
+                    .join(", ")})`
+                : "";
+            const waitFlag = wait ? " -Wait" : "";
+            const script = `Start-Process -FilePath ${filePath}${argList}${waitFlag}`;
+            await GloscTools.spawnCommand("powershell", [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ], "utf8");
+            return { ok: true, target };
+        }
+        if (process.platform === "darwin") {
+            await GloscTools.spawnCommand("open", [target], "utf8");
+            return { ok: true, target };
+        }
+        // linux / other
+        await GloscTools.spawnCommand("xdg-open", [target], "utf8");
+        return { ok: true, target };
+    }
     /**
      * 使用浏览器或 fetch 获取网页内容
      * @param url 网页URL地址
