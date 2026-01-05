@@ -1,10 +1,10 @@
 {
   "name": "glosc-mcp",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "main": "index.js",
   "type": "module",
   "bin": {
-    "glosc-mcp": "node build/index.js"
+    "glosc": "build/index.js"
   },
   "scripts": {
     "build": "tsc"
