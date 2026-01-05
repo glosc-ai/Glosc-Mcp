@@ -1,4 +1,4 @@
 node_modules
 .vscode
-/libs/7z/*
+# /libs/7z/*
 /build
