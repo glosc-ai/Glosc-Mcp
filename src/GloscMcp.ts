@@ -72,32 +72,6 @@ export class GloscMcp {
         );
 
         this.server.registerTool(
-            "web-search",
-            {
-                description: "使用 Bing 联网搜索信息",
-                inputSchema: z.object({
-                    query: z.string().describe("搜索查询内容"),
-                }),
-            },
-            async (input) => {
-                const url = `https://cn.bing.com/search?q=${encodeURIComponent(
-                    input.query
-                )}`;
-
-                const content = await GloscTools.usebrowser(url, true, "text");
-
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: content,
-                        },
-                    ],
-                };
-            }
-        );
-
-        this.server.registerTool(
             "readFile",
             {
                 description:
