@@ -4,7 +4,7 @@
   "main": "index.js",
   "type": "module",
   "bin": {
-    "glosc": "./build/index.js"
+    "glosc": "build/index.js"
   },
   "scripts": {
     "build": "tsc"

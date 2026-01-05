@@ -2,7 +2,22 @@
 
 适用于 Glosc Copilot 的 Mcp 工具集。
 
-## Tools
+### 配置
+```json
+{
+  "servers": {
+    "glosc": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "glosc-mcp@latest"
+      ]
+    }
+  }
+}
+```
+
+### Tools
 
 - `listApps`
 	- 获取已安装应用列表（Windows 注册表）
