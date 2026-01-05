@@ -1,10 +1,10 @@
 {
   "name": "glosc-mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "index.js",
   "type": "module",
   "bin": {
-    "glosc": "build/index.js"
+    "glosc-mcp": "node build/index.js"
   },
   "scripts": {
     "build": "tsc"
@@ -20,7 +20,7 @@
     "Glosc Copilot"
   ],
   "author": "小莫",
-  "license": "ISC",
+  "license": "MIT",
   "files": [
     "build",
     "libs"
