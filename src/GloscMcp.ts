@@ -218,6 +218,162 @@ export class GloscMcp {
                 };
             }
         );
+
+        this.server.registerTool(
+            "editText",
+            {
+                description:
+                    "文本写入/编辑：支持按行添加/替换/删除（可批量），或创建/替换/删除整个文件",
+                inputSchema: z
+                    .object({
+                        path: z.string().describe("文件的绝对路径"),
+                        encoding: z
+                            .string()
+                            .describe("文本编码（默认 utf8）")
+                            .default("utf8"),
+                        newline: z
+                            .enum(["auto", "lf", "crlf"])
+                            .describe("换行符策略：auto/lf/crlf")
+                            .default("auto"),
+                        ensureFinalNewline: z
+                            .boolean()
+                            .describe("是否确保文件末尾以换行结尾")
+                            .default(false),
+                        returnContent: z
+                            .boolean()
+                            .describe("是否在结果中返回最终内容（可能很大）")
+                            .default(false),
+                        createIfMissing: z
+                            .boolean()
+                            .describe(
+                                "按行 edits 时文件不存在是否自动新建（默认 false）"
+                            )
+                            .default(false),
+                        file: z
+                            .union([
+                                z.object({
+                                    action: z
+                                        .literal("create")
+                                        .describe("新建文件"),
+                                    content: z.string().describe("文件内容"),
+                                    overwrite: z
+                                        .boolean()
+                                        .describe("文件已存在时是否覆盖")
+                                        .default(false),
+                                }),
+                                z.object({
+                                    action: z
+                                        .literal("replace")
+                                        .describe("替换整个文件内容"),
+                                    content: z.string().describe("文件内容"),
+                                }),
+                                z.object({
+                                    action: z
+                                        .literal("delete")
+                                        .describe("删除文件"),
+                                }),
+                            ])
+                            .optional(),
+                        edits: z
+                            .array(
+                                z.union([
+                                    z.object({
+                                        op: z.literal("add"),
+                                        at: z
+                                            .number()
+                                            .int()
+                                            .min(1)
+                                            .describe(
+                                                "插入位置行号（1-based）；允许 lineCount+1 表示追加"
+                                            ),
+                                        position: z
+                                            .enum(["before", "after"])
+                                            .describe("插入到该行之前或之后")
+                                            .default("before"),
+                                        lines: z
+                                            .array(z.string())
+                                            .min(1)
+                                            .describe(
+                                                "要插入的行（不含换行符）"
+                                            ),
+                                    }),
+                                    z.object({
+                                        op: z.literal("replace"),
+                                        start: z
+                                            .number()
+                                            .int()
+                                            .min(1)
+                                            .describe("起始行号（1-based）"),
+                                        end: z
+                                            .number()
+                                            .int()
+                                            .min(1)
+                                            .optional()
+                                            .describe(
+                                                "结束行号（1-based，含）；缺省则等于 start"
+                                            ),
+                                        lines: z
+                                            .array(z.string())
+                                            .describe("替换后的行（可多行）"),
+                                    }),
+                                    z.object({
+                                        op: z.literal("delete"),
+                                        start: z
+                                            .number()
+                                            .int()
+                                            .min(1)
+                                            .describe("起始行号（1-based）"),
+                                        end: z
+                                            .number()
+                                            .int()
+                                            .min(1)
+                                            .optional()
+                                            .describe(
+                                                "结束行号（1-based，含）；缺省则等于 start"
+                                            ),
+                                    }),
+                                ])
+                            )
+                            .optional(),
+                    })
+                    .refine((v) => !!v.file !== !!v.edits, {
+                        message: "必须且只能提供 file 或 edits 之一",
+                    }),
+            },
+            async (input) => {
+                try {
+                    const res = await GloscTools.editTextFile({
+                        path: input.path,
+                        encoding: input.encoding,
+                        newline: input.newline,
+                        ensureFinalNewline: input.ensureFinalNewline,
+                        returnContent: input.returnContent,
+                        createIfMissing: input.createIfMissing,
+                        file: input.file as any,
+                        edits: input.edits as any,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify(res, null, 2),
+                            },
+                        ],
+                    };
+                } catch (error) {
+                    const errorMessage =
+                        error instanceof Error ? error.message : String(error);
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `编辑文本失败: ${errorMessage}`,
+                            },
+                        ],
+                    };
+                }
+            }
+        );
     }
     /**
      * 注册资源

@@ -1,6 +1,6 @@
 {
   "name": "glosc-mcp",
-  "version": "1.0.6",
+  "version": "1.1.1",
   "main": "index.js",
   "type": "module",
   "bin": {
@@ -34,11 +34,9 @@
     "@modelcontextprotocol/sdk": "^1.25.1",
     "cheerio": "^1.1.2",
     "csv-parser": "^3.2.0",
-    "iconv-lite": "^0.7.1",
     "mammoth": "^1.11.0",
     "pdf-parse": "^2.4.5",
     "playwright": "^1.57.0",
-    "sharp": "^0.34.5",
     "xlsx": "^0.18.5",
     "zod": "^4.2.1"
   },

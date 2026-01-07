@@ -30,3 +30,9 @@
 - `openRef`
 	- 打开引用（文件/文件夹/URL/可执行文件），使用系统默认方式打开（Windows 下使用 `Start-Process`）
 	- 入参：`{ target: string, args?: string[], wait?: boolean }`
+
+- `editText`
+  - 文本写入/编辑：按行添加/替换/删除（可批量），或创建/替换/删除整个文件
+  - 入参（概要）：
+    - 整文件：`{ path, file: { action: "create"|"replace"|"delete", content?, overwrite? }, encoding?, newline?, ensureFinalNewline?, returnContent? }`
+    - 按行：`{ path, edits: [{ op: "add"|"replace"|"delete", ... }], createIfMissing?, encoding?, newline?, ensureFinalNewline?, returnContent? }`

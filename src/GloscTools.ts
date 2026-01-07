@@ -636,4 +636,289 @@ if ($null -ne $apps) {
             }
         }
     }
+
+    private static normalizeNewlineOption(
+        newline: "auto" | "lf" | "crlf" | undefined,
+        existingContent: string | undefined
+    ): "\n" | "\r\n" {
+        if (newline === "crlf") return "\r\n";
+        if (newline === "lf") return "\n";
+
+        // auto
+        if (
+            typeof existingContent === "string" &&
+            existingContent.includes("\r\n")
+        ) {
+            return "\r\n";
+        }
+        return "\n";
+    }
+
+    private static splitLinesPreserveEmptyEnd(text: string): string[] {
+        // 支持 \n / \r\n，且保留末尾空行（比如文件以换行结尾）
+        if (text === "") return [""];
+        const lines = text.split(/\r?\n/);
+        return lines;
+    }
+
+    private static joinLines(lines: string[], newline: "\n" | "\r\n"): string {
+        return lines.join(newline);
+    }
+
+    public static async editTextFile(options: {
+        path: string;
+        encoding?: string;
+        newline?: "auto" | "lf" | "crlf";
+        ensureFinalNewline?: boolean;
+        returnContent?: boolean;
+        createIfMissing?: boolean;
+        file?:
+            | {
+                  action: "create";
+                  content: string;
+                  overwrite?: boolean;
+              }
+            | {
+                  action: "replace";
+                  content: string;
+              }
+            | {
+                  action: "delete";
+              };
+        edits?:
+            | Array<
+                  | {
+                        op: "add";
+                        at: number;
+                        position?: "before" | "after";
+                        lines: string[];
+                    }
+                  | {
+                        op: "replace";
+                        start: number;
+                        end?: number;
+                        lines: string[];
+                    }
+                  | {
+                        op: "delete";
+                        start: number;
+                        end?: number;
+                    }
+              >
+            | undefined;
+    }): Promise<{
+        ok: true;
+        path: string;
+        action: "create" | "replace" | "delete" | "edit";
+        existedBefore: boolean;
+        lineCountBefore?: number;
+        lineCountAfter?: number;
+        editsApplied?: number;
+        bytesWritten?: number;
+        content?: string;
+    }> {
+        const filePath = options.path?.trim();
+        if (!filePath) throw new Error("path 不能为空");
+
+        const encoding = options.encoding ?? "utf8";
+        const returnContent = options.returnContent ?? false;
+        const createIfMissing = options.createIfMissing ?? false;
+
+        const hasFileAction = !!options.file;
+        const hasEdits =
+            Array.isArray(options.edits) && options.edits.length > 0;
+        if ((hasFileAction && hasEdits) || (!hasFileAction && !hasEdits)) {
+            throw new Error("必须且只能提供 file 或 edits 之一");
+        }
+
+        let existedBefore = true;
+        let originalBuffer: Buffer | null = null;
+        try {
+            originalBuffer = await fs.readFile(filePath);
+        } catch (e: any) {
+            if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) {
+                existedBefore = false;
+                originalBuffer = null;
+            } else {
+                throw e;
+            }
+        }
+
+        if (options.file) {
+            const action = options.file.action;
+
+            if (action === "delete") {
+                if (existedBefore) {
+                    await fs.unlink(filePath);
+                }
+                return {
+                    ok: true,
+                    path: filePath,
+                    action: "delete",
+                    existedBefore,
+                };
+            }
+
+            if (action === "create") {
+                if (existedBefore && !options.file.overwrite) {
+                    throw new Error(
+                        "文件已存在，action=create 且 overwrite=false"
+                    );
+                }
+                await fs.mkdir(path.dirname(filePath), { recursive: true });
+                const newline = GloscTools.normalizeNewlineOption(
+                    options.newline,
+                    undefined
+                );
+                let content = options.file.content ?? "";
+                if (options.ensureFinalNewline) {
+                    if (!content.endsWith("\n") && !content.endsWith("\r\n")) {
+                        content += newline;
+                    }
+                }
+                const outBuffer = (iconv as any).encode(content, encoding);
+                await fs.writeFile(filePath, outBuffer);
+                return {
+                    ok: true,
+                    path: filePath,
+                    action: existedBefore ? "replace" : "create",
+                    existedBefore,
+                    bytesWritten: outBuffer.length,
+                    content: returnContent ? content : undefined,
+                };
+            }
+
+            // replace
+            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            const decodedExisting =
+                originalBuffer != null
+                    ? (iconv as any).decode(originalBuffer, encoding)
+                    : undefined;
+            const newline = GloscTools.normalizeNewlineOption(
+                options.newline,
+                decodedExisting
+            );
+            let content = options.file.content ?? "";
+            if (options.ensureFinalNewline) {
+                if (!content.endsWith("\n") && !content.endsWith("\r\n")) {
+                    content += newline;
+                }
+            }
+            const outBuffer = (iconv as any).encode(content, encoding);
+            await fs.writeFile(filePath, outBuffer);
+            return {
+                ok: true,
+                path: filePath,
+                action: "replace",
+                existedBefore,
+                bytesWritten: outBuffer.length,
+                content: returnContent ? content : undefined,
+            };
+        }
+
+        // line edits
+        let text = "";
+        if (originalBuffer != null) {
+            text = (iconv as any).decode(originalBuffer, encoding);
+        } else {
+            if (!createIfMissing) {
+                throw new Error(
+                    "文件不存在；如需新建请使用 file.action=create 或 createIfMissing=true"
+                );
+            }
+            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            text = "";
+        }
+
+        const newline = GloscTools.normalizeNewlineOption(
+            options.newline,
+            text
+        );
+
+        // 注意：split 后如果原文为空，返回 [""]，这样 lineCount 语义更贴近编辑器
+        let lines = GloscTools.splitLinesPreserveEmptyEnd(text);
+        const lineCountBefore = lines.length;
+
+        const edits = options.edits ?? [];
+        for (const edit of edits) {
+            if (edit.op === "add") {
+                const position = edit.position ?? "before";
+                const at = Math.trunc(edit.at);
+                if (!Number.isFinite(at) || at < 1) {
+                    throw new Error("add.at 必须为 >=1 的整数");
+                }
+
+                // 允许 at = lines.length + 1（before）用于追加到末尾
+                const maxAt = lines.length + 1;
+                if (at > maxAt) {
+                    throw new Error(
+                        `add.at 超出范围：当前最大允许 ${maxAt}（可用 lineCount+1 追加）`
+                    );
+                }
+
+                const insertIndex =
+                    position === "after"
+                        ? Math.min(at, lines.length) // after 最多插在最后一行之后
+                        : at - 1;
+
+                lines.splice(insertIndex, 0, ...edit.lines);
+            } else if (edit.op === "replace") {
+                const start = Math.trunc(edit.start);
+                const end = Math.trunc(edit.end ?? edit.start);
+                if (!Number.isFinite(start) || start < 1) {
+                    throw new Error("replace.start 必须为 >=1 的整数");
+                }
+                if (!Number.isFinite(end) || end < start) {
+                    throw new Error("replace.end 必须为 >= start 的整数");
+                }
+                if (end > lines.length) {
+                    throw new Error(
+                        `replace 超出范围：当前行数 ${lines.length}`
+                    );
+                }
+                lines.splice(start - 1, end - start + 1, ...edit.lines);
+            } else if (edit.op === "delete") {
+                const start = Math.trunc(edit.start);
+                const end = Math.trunc(edit.end ?? edit.start);
+                if (!Number.isFinite(start) || start < 1) {
+                    throw new Error("delete.start 必须为 >=1 的整数");
+                }
+                if (!Number.isFinite(end) || end < start) {
+                    throw new Error("delete.end 必须为 >= start 的整数");
+                }
+                if (end > lines.length) {
+                    throw new Error(
+                        `delete 超出范围：当前行数 ${lines.length}`
+                    );
+                }
+                lines.splice(start - 1, end - start + 1);
+                if (lines.length === 0) lines = [""];
+            } else {
+                const neverEdit: never = edit;
+                throw new Error(`未知 edit.op: ${(neverEdit as any).op}`);
+            }
+        }
+
+        let outText = GloscTools.joinLines(lines, newline);
+        if (options.ensureFinalNewline) {
+            if (!outText.endsWith("\n") && !outText.endsWith("\r\n")) {
+                outText += newline;
+            }
+        }
+
+        const outBuffer = (iconv as any).encode(outText, encoding);
+        await fs.writeFile(filePath, outBuffer);
+
+        return {
+            ok: true,
+            path: filePath,
+            action: "edit",
+            existedBefore,
+            lineCountBefore,
+            lineCountAfter: lines.length,
+            editsApplied: edits.length,
+            bytesWritten: outBuffer.length,
+            content: returnContent ? outText : undefined,
+        };
+    }
 }
