@@ -585,10 +585,35 @@ if ($null -ne $apps) {
         } else if ([".xlsx", ".xls"].includes(ext)) {
             // Excel文件，解析为JSON
             const workbook = XLSX.read(buffer, { type: "buffer" });
-            const sheetName = workbook.SheetNames[0];
-            const worksheet = workbook.Sheets[sheetName];
-            const json = XLSX.utils.sheet_to_json(worksheet);
-            return JSON.stringify(json, null, 2);
+            const sheetNames = (workbook.SheetNames ?? []).filter(
+                (name) => typeof name === "string" && name.trim().length > 0
+            );
+
+            if (sheetNames.length === 0) {
+                return JSON.stringify([], null, 2);
+            }
+
+            const sheets = sheetNames.map((sheetName) => {
+                const worksheet = workbook.Sheets[sheetName];
+                const rows = worksheet
+                    ? XLSX.utils.sheet_to_json(worksheet, {
+                          defval: null,
+                      })
+                    : [];
+
+                return {
+                    sheetName,
+                    rows,
+                };
+            });
+
+            // 兼容：只有 1 张表时保持旧行为（直接返回行数组）
+            if (sheets.length === 1) {
+                return JSON.stringify(sheets[0].rows, null, 2);
+            }
+
+            // 多张表：返回按 sheet 分组的结构，避免数据混淆
+            return JSON.stringify({ sheets }, null, 2);
         } else if (ext === ".pdf") {
             // PDF文件，提取文本
             const data = await (pdfParse as any)(buffer);
@@ -640,10 +665,9 @@ if ($null -ne $apps) {
     private static normalizeNewlineOption(
         newline: "auto" | "lf" | "crlf" | undefined,
         existingContent: string | undefined
-    ): "\n" | "\r\n" {
+    ): string {
         if (newline === "crlf") return "\r\n";
         if (newline === "lf") return "\n";
-
         // auto
         if (
             typeof existingContent === "string" &&
@@ -657,268 +681,193 @@ if ($null -ne $apps) {
     private static splitLinesPreserveEmptyEnd(text: string): string[] {
         // 支持 \n / \r\n，且保留末尾空行（比如文件以换行结尾）
         if (text === "") return [""];
-        const lines = text.split(/\r?\n/);
-        return lines;
+        return text.split(/\r?\n/);
     }
 
-    private static joinLines(lines: string[], newline: "\n" | "\r\n"): string {
+    private static joinLines(lines: string[], newline: string): string {
         return lines.join(newline);
     }
 
-    public static async editTextFile(options: {
+    private static async pathExists(p: string): Promise<boolean> {
+        try {
+            await fs.stat(p);
+            return true;
+        } catch (e: any) {
+            if (e && (e.code === "ENOENT" || e.code === "ENOTDIR"))
+                return false;
+            throw e;
+        }
+    }
+
+    private static async removePath(targetPath: string): Promise<void> {
+        const st = await fs.lstat(targetPath);
+        if (st.isDirectory()) {
+            await fs.rm(targetPath, { recursive: true, force: true });
+        } else {
+            await fs.unlink(targetPath);
+        }
+    }
+
+    private static async movePathInternal(options: {
+        from: string;
+        to: string;
+        overwrite?: boolean;
+        createDirs?: boolean;
+    }): Promise<{ ok: true; from: string; to: string }> {
+        const from = options.from?.trim();
+        const to = options.to?.trim();
+        if (!from) throw new Error("from 不能为空");
+        if (!to) throw new Error("to 不能为空");
+
+        const overwrite = options.overwrite ?? false;
+        const createDirs = options.createDirs ?? true;
+
+        const fromStat = await fs.lstat(from).catch((e: any) => {
+            if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) {
+                throw new Error("源路径不存在");
+            }
+            throw e;
+        });
+
+        let dest = to;
+        const toLooksLikeDir = /[\\/]+$/.test(to);
+        if (toLooksLikeDir) {
+            dest = path.join(to, path.basename(from));
+        } else {
+            try {
+                const toStat = await fs.lstat(to);
+                if (toStat.isDirectory()) {
+                    dest = path.join(to, path.basename(from));
+                }
+            } catch (e: any) {
+                if (!(e && (e.code === "ENOENT" || e.code === "ENOTDIR"))) {
+                    throw e;
+                }
+            }
+        }
+
+        if (await GloscTools.pathExists(dest)) {
+            if (!overwrite) {
+                throw new Error("目标已存在；如需覆盖请设置 overwrite=true");
+            }
+            await GloscTools.removePath(dest);
+        }
+
+        if (createDirs) {
+            await fs.mkdir(path.dirname(dest), { recursive: true });
+        }
+
+        try {
+            await fs.rename(from, dest);
+            return { ok: true, from, to: dest };
+        } catch (e: any) {
+            // 跨盘符/设备移动在部分平台会抛 EXDEV
+            if (e && e.code === "EXDEV") {
+                if (fromStat.isDirectory()) {
+                    const cp = (fs as any).cp as
+                        | undefined
+                        | ((
+                              src: string,
+                              dest: string,
+                              opts: any
+                          ) => Promise<void>);
+                    if (!cp) {
+                        throw new Error(
+                            "跨设备移动目录失败（EXDEV），且当前 Node 版本不支持 fs.cp"
+                        );
+                    }
+                    await cp(from, dest, { recursive: true, force: overwrite });
+                    await fs.rm(from, { recursive: true, force: true });
+                    return { ok: true, from, to: dest };
+                }
+
+                await fs.copyFile(from, dest);
+                await fs.unlink(from);
+                return { ok: true, from, to: dest };
+            }
+            throw e;
+        }
+    }
+
+    public static async renameFile(options: {
         path: string;
-        encoding?: string;
-        newline?: "auto" | "lf" | "crlf";
-        ensureFinalNewline?: boolean;
-        returnContent?: boolean;
-        createIfMissing?: boolean;
-        file?:
-            | {
-                  action: "create";
-                  content: string;
-                  overwrite?: boolean;
-              }
-            | {
-                  action: "replace";
-                  content: string;
-              }
-            | {
-                  action: "delete";
-              };
-        edits?:
-            | Array<
-                  | {
-                        op: "add";
-                        at: number;
-                        position?: "before" | "after";
-                        lines: string[];
-                    }
-                  | {
-                        op: "replace";
-                        start: number;
-                        end?: number;
-                        lines: string[];
-                    }
-                  | {
-                        op: "delete";
-                        start: number;
-                        end?: number;
-                    }
-              >
-            | undefined;
+        newName: string;
+        overwrite?: boolean;
+    }): Promise<{ ok: true; from: string; to: string }> {
+        const from = options.path?.trim();
+        const newName = options.newName?.trim();
+        if (!from) throw new Error("path 不能为空");
+        if (!newName) throw new Error("newName 不能为空");
+
+        // 限制为“同目录改名”，避免把 rename 当 move 用
+        const base = path.basename(newName);
+        if (base !== newName) {
+            throw new Error("newName 只能是文件名，不能包含路径分隔符");
+        }
+        const to = path.join(path.dirname(from), newName);
+
+        return GloscTools.movePathInternal({
+            from,
+            to,
+            overwrite: options.overwrite,
+            createDirs: true,
+        });
+    }
+
+    public static async moveFile(options: {
+        from: string;
+        to: string;
+        overwrite?: boolean;
+        createDirs?: boolean;
+    }): Promise<{ ok: true; from: string; to: string }> {
+        return GloscTools.movePathInternal(options);
+    }
+
+    public static async listFilesRecursive(options: {
+        dir: string;
+        limit?: number;
     }): Promise<{
         ok: true;
-        path: string;
-        action: "create" | "replace" | "delete" | "edit";
-        existedBefore: boolean;
-        lineCountBefore?: number;
-        lineCountAfter?: number;
-        editsApplied?: number;
-        bytesWritten?: number;
-        content?: string;
+        dir: string;
+        files: string[];
+        truncated: boolean;
     }> {
-        const filePath = options.path?.trim();
-        if (!filePath) throw new Error("path 不能为空");
+        const dir = options.dir?.trim();
+        if (!dir) throw new Error("dir 不能为空");
+        const limit = Math.max(1, Math.trunc(options.limit ?? 5000));
 
-        const encoding = options.encoding ?? "utf8";
-        const returnContent = options.returnContent ?? false;
-        const createIfMissing = options.createIfMissing ?? false;
-
-        const hasFileAction = !!options.file;
-        const hasEdits =
-            Array.isArray(options.edits) && options.edits.length > 0;
-        if ((hasFileAction && hasEdits) || (!hasFileAction && !hasEdits)) {
-            throw new Error("必须且只能提供 file 或 edits 之一");
-        }
-
-        let existedBefore = true;
-        let originalBuffer: Buffer | null = null;
-        try {
-            originalBuffer = await fs.readFile(filePath);
-        } catch (e: any) {
+        const rootStat = await fs.lstat(dir).catch((e: any) => {
             if (e && (e.code === "ENOENT" || e.code === "ENOTDIR")) {
-                existedBefore = false;
-                originalBuffer = null;
-            } else {
-                throw e;
+                throw new Error("目录不存在");
             }
+            throw e;
+        });
+        if (!rootStat.isDirectory()) {
+            throw new Error("dir 必须是目录");
         }
 
-        if (options.file) {
-            const action = options.file.action;
+        const files: string[] = [];
+        const stack: string[] = [dir];
+        let truncated = false;
 
-            if (action === "delete") {
-                if (existedBefore) {
-                    await fs.unlink(filePath);
-                }
-                return {
-                    ok: true,
-                    path: filePath,
-                    action: "delete",
-                    existedBefore,
-                };
-            }
-
-            if (action === "create") {
-                if (existedBefore && !options.file.overwrite) {
-                    throw new Error(
-                        "文件已存在，action=create 且 overwrite=false"
-                    );
-                }
-                await fs.mkdir(path.dirname(filePath), { recursive: true });
-                const newline = GloscTools.normalizeNewlineOption(
-                    options.newline,
-                    undefined
-                );
-                let content = options.file.content ?? "";
-                if (options.ensureFinalNewline) {
-                    if (!content.endsWith("\n") && !content.endsWith("\r\n")) {
-                        content += newline;
+        while (stack.length > 0) {
+            const current = stack.pop() as string;
+            const entries = await fs.readdir(current, { withFileTypes: true });
+            for (const entry of entries) {
+                const full = path.join(current, entry.name);
+                if (entry.isDirectory()) {
+                    stack.push(full);
+                } else if (entry.isFile()) {
+                    files.push(full);
+                    if (files.length >= limit) {
+                        truncated = true;
+                        stack.length = 0;
+                        break;
                     }
                 }
-                const outBuffer = (iconv as any).encode(content, encoding);
-                await fs.writeFile(filePath, outBuffer);
-                return {
-                    ok: true,
-                    path: filePath,
-                    action: existedBefore ? "replace" : "create",
-                    existedBefore,
-                    bytesWritten: outBuffer.length,
-                    content: returnContent ? content : undefined,
-                };
-            }
-
-            // replace
-            await fs.mkdir(path.dirname(filePath), { recursive: true });
-            const decodedExisting =
-                originalBuffer != null
-                    ? (iconv as any).decode(originalBuffer, encoding)
-                    : undefined;
-            const newline = GloscTools.normalizeNewlineOption(
-                options.newline,
-                decodedExisting
-            );
-            let content = options.file.content ?? "";
-            if (options.ensureFinalNewline) {
-                if (!content.endsWith("\n") && !content.endsWith("\r\n")) {
-                    content += newline;
-                }
-            }
-            const outBuffer = (iconv as any).encode(content, encoding);
-            await fs.writeFile(filePath, outBuffer);
-            return {
-                ok: true,
-                path: filePath,
-                action: "replace",
-                existedBefore,
-                bytesWritten: outBuffer.length,
-                content: returnContent ? content : undefined,
-            };
-        }
-
-        // line edits
-        let text = "";
-        if (originalBuffer != null) {
-            text = (iconv as any).decode(originalBuffer, encoding);
-        } else {
-            if (!createIfMissing) {
-                throw new Error(
-                    "文件不存在；如需新建请使用 file.action=create 或 createIfMissing=true"
-                );
-            }
-            await fs.mkdir(path.dirname(filePath), { recursive: true });
-            text = "";
-        }
-
-        const newline = GloscTools.normalizeNewlineOption(
-            options.newline,
-            text
-        );
-
-        // 注意：split 后如果原文为空，返回 [""]，这样 lineCount 语义更贴近编辑器
-        let lines = GloscTools.splitLinesPreserveEmptyEnd(text);
-        const lineCountBefore = lines.length;
-
-        const edits = options.edits ?? [];
-        for (const edit of edits) {
-            if (edit.op === "add") {
-                const position = edit.position ?? "before";
-                const at = Math.trunc(edit.at);
-                if (!Number.isFinite(at) || at < 1) {
-                    throw new Error("add.at 必须为 >=1 的整数");
-                }
-
-                // 允许 at = lines.length + 1（before）用于追加到末尾
-                const maxAt = lines.length + 1;
-                if (at > maxAt) {
-                    throw new Error(
-                        `add.at 超出范围：当前最大允许 ${maxAt}（可用 lineCount+1 追加）`
-                    );
-                }
-
-                const insertIndex =
-                    position === "after"
-                        ? Math.min(at, lines.length) // after 最多插在最后一行之后
-                        : at - 1;
-
-                lines.splice(insertIndex, 0, ...edit.lines);
-            } else if (edit.op === "replace") {
-                const start = Math.trunc(edit.start);
-                const end = Math.trunc(edit.end ?? edit.start);
-                if (!Number.isFinite(start) || start < 1) {
-                    throw new Error("replace.start 必须为 >=1 的整数");
-                }
-                if (!Number.isFinite(end) || end < start) {
-                    throw new Error("replace.end 必须为 >= start 的整数");
-                }
-                if (end > lines.length) {
-                    throw new Error(
-                        `replace 超出范围：当前行数 ${lines.length}`
-                    );
-                }
-                lines.splice(start - 1, end - start + 1, ...edit.lines);
-            } else if (edit.op === "delete") {
-                const start = Math.trunc(edit.start);
-                const end = Math.trunc(edit.end ?? edit.start);
-                if (!Number.isFinite(start) || start < 1) {
-                    throw new Error("delete.start 必须为 >=1 的整数");
-                }
-                if (!Number.isFinite(end) || end < start) {
-                    throw new Error("delete.end 必须为 >= start 的整数");
-                }
-                if (end > lines.length) {
-                    throw new Error(
-                        `delete 超出范围：当前行数 ${lines.length}`
-                    );
-                }
-                lines.splice(start - 1, end - start + 1);
-                if (lines.length === 0) lines = [""];
-            } else {
-                const neverEdit: never = edit;
-                throw new Error(`未知 edit.op: ${(neverEdit as any).op}`);
             }
         }
 
-        let outText = GloscTools.joinLines(lines, newline);
-        if (options.ensureFinalNewline) {
-            if (!outText.endsWith("\n") && !outText.endsWith("\r\n")) {
-                outText += newline;
-            }
-        }
-
-        const outBuffer = (iconv as any).encode(outText, encoding);
-        await fs.writeFile(filePath, outBuffer);
-
-        return {
-            ok: true,
-            path: filePath,
-            action: "edit",
-            existedBefore,
-            lineCountBefore,
-            lineCountAfter: lines.length,
-            editsApplied: edits.length,
-            bytesWritten: outBuffer.length,
-            content: returnContent ? outText : undefined,
-        };
+        return { ok: true, dir, files, truncated };
     }
 }
