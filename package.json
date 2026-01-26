@@ -1,48 +1,10 @@
 {
-  "name": "glosc-mcp",
-  "version": "1.2.1",
-  "main": "index.js",
-  "type": "module",
-  "bin": {
-    "glosc": "build/index.js"
-  },
+  "name": "Glosc-Python",
+  "version": "0.1.0",
+  "description": "A brief description of your project",
+  "author": "xiaom",
+  "private": true,
   "scripts": {
-    "build": "tsc"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/glosc-ai/Glosc-Mcp.git"
-  },
-  "keywords": [
-    "MCP",
-    "Tools",
-    "Glosc",
-    "Glosc Copilot"
-  ],
-  "author": "小莫",
-  "license": "MIT",
-  "files": [
-    "build",
-    "libs"
-  ],
-  "bugs": {
-    "url": "https://github.com/glosc-ai/Glosc-Mcp/issues"
-  },
-  "homepage": "https://github.com/glosc-ai/Glosc-Mcp#readme",
-  "description": "",
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.1",
-    "cheerio": "^1.1.2",
-    "csv-parser": "^3.2.0",
-    "mammoth": "^1.11.0",
-    "pdf-parse": "^2.4.5",
-    "playwright": "^1.57.0",
-    "xlsx": "^0.18.5",
-    "zod": "^4.2.1"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.57.0",
-    "@types/node": "^25.0.3",
-    "typescript": "^5.9.3"
+    "package": "node scripts/package.mjs"
   }
 }

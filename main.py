@@ -29,7 +29,7 @@ async def tool_web(
 
 @mcp.tool(
     name="readFile",
-    description="读取文件内容，支持多种文件类型：文本、图片、表格、文档、压缩包（ZIP、RAR、7Z、TAR、GZ等）",
+    description="读取文件内容，支持多种文件类型：文本、图片、表格、文档、压缩包（ZIP、RAR、7Z、TAR、GZ等）, 需要传递绝对路径",
 )
 async def tool_read_file(path: str) -> str:
     try:
@@ -84,7 +84,7 @@ async def tool_open_ref(
     return json.dumps(res, ensure_ascii=False, indent=2)
 
 
-@mcp.tool(name="renameFile", description="重命名文件（同目录改名）")
+@mcp.tool(name="renameFile", description="重命名文件（同目录改名）; 需要传递绝对路径")
 async def tool_rename_file(
     path: str,
     newName: str,
@@ -99,7 +99,7 @@ async def tool_rename_file(
         return f"重命名失败: {e}"
 
 
-@mcp.tool(name="moveFile", description="移动文件到新路径（必要时自动创建目录）")
+@mcp.tool(name="moveFile", description="移动文件到新路径（必要时自动创建目录）; 需要传递绝对路径")
 async def tool_move_file(
     from_: Annotated[str, Field(alias="from")],
     to: str,
@@ -120,13 +120,40 @@ async def tool_move_file(
         return f"移动失败: {e}"
 
 
-@mcp.tool(name="listFilesRecursive", description="递归获取文件夹中的所有文件")
+@mcp.tool(name="listFilesRecursive", description="递归获取文件夹中的所有文件; 需要传递绝对路径")
 async def tool_list_files_recursive(dir: str, limit: int = 5000) -> str:
     try:
         res = GloscTools.list_files_recursive({"dir": dir, "limit": limit})
         return json.dumps(res, ensure_ascii=False, indent=2)
     except Exception as e:
         return f"列出文件失败: {e}"
+
+
+@mcp.tool(
+    name="writeFile",
+    description="写入文件内容，支持全覆盖、单行插入、多行插入、替换、新建文件等功能; 需要传递绝对路径",
+)
+async def tool_write_file(
+    path: str,
+    mode: Literal["overwrite", "insert_line", "insert_lines", "replace", "create"],
+    content: str = "",
+    line: int | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+) -> str:
+    try:
+        options = {
+            "path": path,
+            "mode": mode,
+            "content": content,
+            "line": line,
+            "old_string": old_string,
+            "new_string": new_string,
+        }
+        res = GloscTools.write_file(options)
+        return json.dumps(res, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"写入文件失败: {e}"
 
 
 def main():

@@ -1,0 +1,11 @@
+name: "Glosc-Python"
+description: "Glosc 的一些基础工具"
+icon: ""
+language: "python"
+author: "xiaom"
+mcp:
+    runtime: "python"
+    entry: "main.py"
+    cwd: "."
+    env: {}
+    args: []

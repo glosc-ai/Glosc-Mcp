@@ -693,3 +693,71 @@ if ($null -ne $apps) {
                 break
 
         return {"ok": True, "dir": dir_path, "files": files, "truncated": truncated}
+
+    @staticmethod
+    def write_file(options: dict[str, Any]) -> dict[str, Any]:
+        path = options.get("path")
+        mode = options.get("mode", "overwrite")
+        content = options.get("content", "")
+        line = options.get("line")
+        old_string = options.get("old_string")
+        new_string = options.get("new_string")
+
+        if not path:
+            return {"ok": False, "error": "path is required"}
+
+        p = Path(path)
+
+        if mode == "create":
+            if p.exists():
+                return {"ok": False, "error": "file already exists"}
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return {"ok": True, "message": "file created"}
+
+        if not p.exists():
+            # return {"ok": False, "error": "file does not exist"}
+            # 如果不存在，则创建新文件
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+
+        if mode == "overwrite":
+            p.write_text(content, encoding="utf-8")
+            return {"ok": True, "message": "file overwritten"}
+
+        # Read current content
+        current_content = p.read_text(encoding="utf-8")
+        lines = current_content.splitlines(keepends=True)
+
+        if mode == "insert_line":
+            if line is None:
+                return {"ok": False, "error": "line is required for insert_line"}
+            if line < 1 or line > len(lines) + 1:
+                return {"ok": False, "error": "invalid line number"}
+            lines.insert(line - 1, content + "\n")
+            new_content = "".join(lines)
+            p.write_text(new_content, encoding="utf-8")
+            return {"ok": True, "message": "line inserted"}
+
+        if mode == "insert_lines":
+            if line is None:
+                return {"ok": False, "error": "line is required for insert_lines"}
+            if line < 1 or line > len(lines) + 1:
+                return {"ok": False, "error": "invalid line number"}
+            new_lines = content.splitlines(keepends=True)
+            for i, nl in enumerate(new_lines):
+                lines.insert(line - 1 + i, nl)
+            new_content = "".join(lines)
+            p.write_text(new_content, encoding="utf-8")
+            return {"ok": True, "message": "lines inserted"}
+
+        if mode == "replace":
+            if old_string is None or new_string is None:
+                return {"ok": False, "error": "old_string and new_string are required for replace"}
+            if old_string not in current_content:
+                return {"ok": False, "error": "old_string not found"}
+            new_content = current_content.replace(old_string, new_string, 1)  # Replace first occurrence
+            p.write_text(new_content, encoding="utf-8")
+            return {"ok": True, "message": "string replaced"}
+
+        return {"ok": False, "error": "invalid mode"}
