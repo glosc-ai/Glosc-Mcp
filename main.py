@@ -130,6 +130,29 @@ async def tool_list_files_recursive(dir: str, limit: int = 5000) -> str:
 
 
 @mcp.tool(
+    name="readSkills",
+    description="读取并解析 Agent Skills 目录或工作区 skills 目录; 需要传递绝对路径",
+)
+async def tool_read_skills(
+    path: str,
+    mode: Literal["directory", "workspace"] = "directory",
+) -> str:
+    try:
+        res = GloscTools.read_skills({"path": path, "mode": mode})
+        return json.dumps(res, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return json.dumps(
+            {
+                "skills": [],
+                "warnings": [f"读取 Skills 失败: {e}"],
+                "scannedCandidates": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+@mcp.tool(
     name="writeFile",
     description="写入文件内容，支持全覆盖、单行插入、多行插入、替换、新建文件等功能; 需要传递绝对路径",
 )

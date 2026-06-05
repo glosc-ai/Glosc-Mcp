@@ -5,7 +5,7 @@ name = "Glosc-Python"
 version = "1.3.1"
 description = ""
 authors = [{ name = "xiaom" }]
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 dependencies = [
   "mcp",
   "markitdown[all]",

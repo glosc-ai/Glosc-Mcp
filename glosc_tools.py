@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +29,9 @@ class SpawnResult:
 
 
 class GloscTools:
+    MAX_TEXT_FILE_SIZE = 1_000_000
+    MAX_STORED_FILE_SUMMARIES = 200
+
     @staticmethod
     def iso_utc_now() -> str:
         return (
@@ -388,6 +393,619 @@ if ($null -ne $apps) {
             # 简易兜底：去标签 + 压缩空白
             text = re.sub(r"<[^>]+>", " ", html)
             return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _normalize_rel_path(value: str) -> str:
+        normalized = str(value or "").replace("\\", "/")
+        normalized = re.sub(r"^/+", "", normalized)
+        normalized = re.sub(r"/+", "/", normalized)
+        normalized = re.sub(r"(^|/)\.\.(?=/|$)", "", normalized)
+        normalized = re.sub(r"^\./", "", normalized).strip()
+        return "" if normalized == "." else normalized
+
+    @staticmethod
+    def _dirname_like(value: str) -> str:
+        normalized = GloscTools._normalize_rel_path(value)
+        index = normalized.rfind("/")
+        return "" if index == -1 else normalized[:index]
+
+    @staticmethod
+    def _basename_like(value: str) -> str:
+        normalized = GloscTools._normalize_rel_path(value)
+        index = normalized.rfind("/")
+        return normalized if index == -1 else normalized[index + 1 :]
+
+    @staticmethod
+    def _extname_like(value: str) -> str:
+        base = GloscTools._basename_like(value)
+        index = base.rfind(".")
+        return "" if index == -1 else base[index:].lower()
+
+    @staticmethod
+    def _to_rel_path(root: Path, full_path: Path) -> str:
+        try:
+            return GloscTools._normalize_rel_path(str(full_path.relative_to(root)))
+        except ValueError:
+            return GloscTools._normalize_rel_path(str(full_path))
+
+    @staticmethod
+    def _should_read_skill_text(path: str, size: int) -> bool:
+        if size > GloscTools.MAX_TEXT_FILE_SIZE:
+            return False
+        return GloscTools._extname_like(path) in {
+            ".md",
+            ".markdown",
+            ".json",
+            ".jsonc",
+            ".yaml",
+            ".yml",
+            ".txt",
+        }
+
+    @staticmethod
+    def _read_directory_bundle(root_path: str) -> list[dict[str, Any]]:
+        root = Path(root_path)
+        files: list[dict[str, Any]] = []
+
+        for current_root, _, filenames in os.walk(root):
+            current = Path(current_root)
+            for name in filenames:
+                file_path = current / name
+                try:
+                    info = file_path.stat()
+                except OSError:
+                    continue
+
+                rel_path = GloscTools._to_rel_path(root, file_path)
+                if not rel_path:
+                    continue
+
+                item: dict[str, Any] = {
+                    "path": rel_path,
+                    "size": int(info.st_size or 0),
+                }
+
+                if GloscTools._should_read_skill_text(rel_path, int(info.st_size or 0)):
+                    try:
+                        item["text"] = GloscTools._decode_text_bytes(file_path.read_bytes())
+                    except OSError:
+                        item["text"] = ""
+
+                files.append(item)
+
+        return files
+
+    @staticmethod
+    def _strip_inline_comment(value: str) -> str:
+        in_single = False
+        in_double = False
+        escaped = False
+
+        for index, char in enumerate(value):
+            if escaped:
+                escaped = False
+                continue
+            if char == "\\" and in_double:
+                escaped = True
+                continue
+            if char == "'" and not in_double:
+                in_single = not in_single
+                continue
+            if char == '"' and not in_single:
+                in_double = not in_double
+                continue
+            if char == "#" and not in_single and not in_double:
+                if index == 0 or value[index - 1].isspace():
+                    return value[:index].rstrip()
+
+        return value.strip()
+
+    @staticmethod
+    def _parse_frontmatter_scalar(value: str) -> Any:
+        raw = GloscTools._strip_inline_comment(value).strip()
+        if not raw:
+            return ""
+
+        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+            return raw[1:-1]
+
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                parsed = json.loads(raw.replace("'", '"'))
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+
+        if raw.startswith("{") and raw.endswith("}"):
+            try:
+                parsed = json.loads(raw.replace("'", '"'))
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+
+        return raw
+
+    @staticmethod
+    def _parse_skill_frontmatter(raw: str) -> dict[str, Any]:
+        frontmatter: dict[str, Any] = {}
+        current_key: str | None = None
+
+        for line in raw.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+
+            list_match = re.match(r"^\s*-\s+(.+?)\s*$", line)
+            if list_match and current_key:
+                current = frontmatter.get(current_key)
+                if not isinstance(current, list):
+                    current = []
+                    frontmatter[current_key] = current
+                current.append(GloscTools._parse_frontmatter_scalar(list_match.group(1)))
+                continue
+
+            nested_match = re.match(r"^\s+([A-Za-z0-9_.-]+):\s*(.*?)\s*$", line)
+            if nested_match and current_key:
+                current = frontmatter.get(current_key)
+                if not isinstance(current, dict):
+                    current = {}
+                    frontmatter[current_key] = current
+                current[nested_match.group(1)] = GloscTools._parse_frontmatter_scalar(nested_match.group(2))
+                continue
+
+            match = re.match(r"^([A-Za-z0-9_.-]+):\s*(.*?)\s*$", line)
+            if not match:
+                continue
+
+            key = match.group(1)
+            value = match.group(2)
+            current_key = key
+
+            if value.strip():
+                frontmatter[key] = GloscTools._parse_frontmatter_scalar(value)
+            elif key == "metadata":
+                frontmatter[key] = {}
+            else:
+                frontmatter[key] = []
+
+        return frontmatter
+
+    @staticmethod
+    def _parse_skill_markdown(markdown: str) -> dict[str, Any]:
+        text = str(markdown or "")
+        matched = re.match(r"^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n)?([\s\S]*)$", text)
+        if not matched:
+            return {"frontmatter": {}, "body": text.strip()}
+
+        return {
+            "frontmatter": GloscTools._parse_skill_frontmatter(matched.group(1) or ""),
+            "body": (matched.group(2) or "").strip(),
+        }
+
+    @staticmethod
+    def _slugify_skill_name(value: str) -> str:
+        normalized = re.sub(r"[^a-z0-9-]+", "-", str(value or "").strip().lower())
+        normalized = re.sub(r"-{2,}", "-", normalized).strip("-")
+        return normalized or "imported-skill"
+
+    @staticmethod
+    def _unique_strings(values: list[Any]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            out.append(text)
+        return out
+
+    @staticmethod
+    def _split_allowed_tools(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return GloscTools._unique_strings([str(item).strip() for item in value])
+
+        raw = str(value or "").strip()
+        if not raw:
+            return []
+        return GloscTools._unique_strings(re.split(r"[\s,]+", raw))
+
+    @staticmethod
+    def _to_string_record(value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, raw_value in value.items():
+            if raw_value is None:
+                continue
+            out[str(key)] = raw_value if isinstance(raw_value, str) else str(raw_value)
+        return out
+
+    @staticmethod
+    def _parse_json_text(text: str) -> Any | None:
+        try:
+            without_comments = re.sub(r"//.*?$|/\*[\s\S]*?\*/", "", text, flags=re.MULTILINE)
+            return json.loads(without_comments)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _looks_like_mcp_config(file: dict[str, Any]) -> bool:
+        text = str(file.get("text") or "")
+        extension = GloscTools._extname_like(str(file.get("path") or ""))
+        if extension not in {".json", ".jsonc", ".yaml", ".yml"}:
+            return False
+
+        if extension in {".json", ".jsonc"}:
+            parsed = GloscTools._parse_json_text(text)
+            if isinstance(parsed, dict):
+                if "mcpServers" in parsed or "servers" in parsed:
+                    return True
+                return ("command" in parsed or "url" in parsed) and any(
+                    key in parsed for key in ("args", "env", "headers", "type")
+                )
+
+        return bool(
+            re.search(r"(^|\n)\s*(mcpServers|servers)\s*:", text)
+            or re.search(r"(^|\n)\s*(command|url)\s*:", text)
+        )
+
+    @staticmethod
+    def _parse_openclaw_plugin_meta(file: dict[str, Any]) -> dict[str, Any] | None:
+        if GloscTools._basename_like(str(file.get("path") or "")) != "openclaw.plugin.json":
+            return None
+
+        parsed = GloscTools._parse_json_text(str(file.get("text") or ""))
+        if not isinstance(parsed, dict):
+            return None
+
+        capabilities = parsed.get("capabilities") if isinstance(parsed.get("capabilities"), dict) else {}
+        capability_tags = capabilities.get("capabilityTags") if isinstance(capabilities, dict) else []
+        tool_names = capabilities.get("toolNames") if isinstance(capabilities, dict) else []
+        bundled_skills = capabilities.get("bundledSkills") if isinstance(capabilities, dict) else []
+
+        return {
+            "kind": "openclaw-plugin",
+            **({"packageName": str(parsed.get("name")).strip()} if parsed.get("name") else {}),
+            **({"displayName": str(parsed.get("displayName")).strip()} if parsed.get("displayName") else {}),
+            **(
+                {"summary": str(parsed.get("summary") or parsed.get("description")).strip()}
+                if parsed.get("summary") or parsed.get("description")
+                else {}
+            ),
+            **({"runtimeId": str(parsed.get("runtimeId")).strip()} if parsed.get("runtimeId") else {}),
+            "capabilityTags": GloscTools._unique_strings(capability_tags if isinstance(capability_tags, list) else []),
+            "toolNames": GloscTools._unique_strings(tool_names if isinstance(tool_names, list) else []),
+            "bundledSkillNames": GloscTools._unique_strings(bundled_skills if isinstance(bundled_skills, list) else []),
+        }
+
+    @staticmethod
+    def _classify_skill_file(rel_path: str) -> str:
+        normalized = GloscTools._normalize_rel_path(rel_path)
+        if normalized.startswith("scripts/"):
+            return "script"
+        if normalized.startswith("references/"):
+            return "reference"
+        if normalized.startswith("assets/"):
+            return "asset"
+        return "other"
+
+    @staticmethod
+    def _collect_skill_files(root_dir: str, files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        prefix = f"{GloscTools._normalize_rel_path(root_dir)}/" if root_dir else ""
+        out: list[dict[str, Any]] = []
+
+        for file in files:
+            normalized = GloscTools._normalize_rel_path(str(file.get("path") or ""))
+            if not normalized:
+                continue
+            if not prefix and normalized == "SKILL.md":
+                continue
+            if prefix:
+                if not normalized.startswith(prefix) or normalized == f"{prefix}SKILL.md":
+                    continue
+                relative_path = normalized[len(prefix) :]
+            else:
+                relative_path = normalized
+
+            out.append(
+                {
+                    "path": relative_path,
+                    "size": int(file.get("size") or 0),
+                    "kind": GloscTools._classify_skill_file(relative_path),
+                }
+            )
+
+            if len(out) >= GloscTools.MAX_STORED_FILE_SUMMARIES:
+                break
+
+        return out
+
+    @staticmethod
+    def _import_skill_directory_source(directory_path: str) -> dict[str, Any]:
+        source_path = str(directory_path or "").strip()
+        source = {
+            "kind": "directory",
+            "original": source_path,
+            "canonical": source_path,
+            "label": Path(source_path).name or source_path,
+        }
+
+        files = GloscTools._read_directory_bundle(source_path)
+        for file in files:
+            file["path"] = GloscTools._normalize_rel_path(str(file.get("path") or ""))
+
+        plugin_file = next(
+            (file for file in files if GloscTools._basename_like(str(file.get("path") or "")) == "openclaw.plugin.json"),
+            None,
+        )
+        package_meta = GloscTools._parse_openclaw_plugin_meta(plugin_file) if plugin_file else None
+        bundled_mcp_count = sum(1 for file in files if GloscTools._looks_like_mcp_config(file))
+        skill_files = [
+            file
+            for file in files
+            if GloscTools._basename_like(str(file.get("path") or "")).upper() == "SKILL.MD"
+        ]
+
+        imported_at = int(time.time() * 1000)
+        skills: list[dict[str, Any]] = []
+
+        for index, skill_file in enumerate(skill_files):
+            raw_markdown = str(skill_file.get("text") or "")
+            parsed = GloscTools._parse_skill_markdown(raw_markdown)
+            frontmatter = parsed["frontmatter"] if isinstance(parsed.get("frontmatter"), dict) else {}
+            skill_root = GloscTools._dirname_like(str(skill_file.get("path") or ""))
+            folder_name = GloscTools._basename_like(skill_root)
+            fallback_name = (
+                (package_meta or {}).get("displayName")
+                or (package_meta or {}).get("packageName")
+                or folder_name
+                or f"imported-skill-{index + 1}"
+            )
+            name = str(frontmatter.get("name") or fallback_name).strip() or str(fallback_name)
+            description = (
+                str(frontmatter.get("description") or (package_meta or {}).get("summary") or f"{name} 导入的兼容技能").strip()
+                or f"{name} 导入的兼容技能"
+            )
+            slug = GloscTools._slugify_skill_name(name)
+            skill_warnings: list[str] = []
+
+            if not frontmatter.get("name"):
+                skill_warnings.append("缺少标准 name frontmatter，已使用兼容回退名称。")
+            if not frontmatter.get("description"):
+                skill_warnings.append("缺少标准 description frontmatter，已使用兼容回退描述。")
+
+            ecosystem_tags = GloscTools._unique_strings(
+                [
+                    "agent-skills",
+                    (package_meta or {}).get("kind"),
+                    "bundled-mcp" if bundled_mcp_count > 0 else "",
+                ]
+            )
+
+            skill: dict[str, Any] = {
+                "id": str(uuid.uuid4()),
+                "dedupeKey": f"{source['canonical']}::{slug}",
+                "slug": slug,
+                "name": name,
+                "description": description,
+                "rawMarkdown": raw_markdown,
+                "instructions": str(parsed.get("body") or ""),
+                "compatibility": str(frontmatter.get("compatibility") or "").strip(),
+                "license": str(frontmatter.get("license") or "").strip(),
+                "allowedTools": GloscTools._split_allowed_tools(frontmatter.get("allowed-tools")),
+                "metadata": GloscTools._to_string_record(frontmatter.get("metadata")),
+                "enabled": True,
+                "importedAt": imported_at,
+                "updatedAt": imported_at,
+                "source": source,
+                "ecosystemTags": ecosystem_tags,
+                "warnings": skill_warnings,
+                "files": GloscTools._collect_skill_files(skill_root, files),
+                "bundledMcpCount": bundled_mcp_count,
+            }
+            if package_meta:
+                skill["packageMeta"] = package_meta
+
+            skills.append(skill)
+
+        warnings: list[str] = []
+        if not skill_files and package_meta and "plugin" in str(package_meta.get("kind") or ""):
+            warnings.append("已识别 OpenClaw/ClawHub 插件元数据，但包内未发现可导入的 SKILL.md。")
+
+        if not skills and bundled_mcp_count == 0:
+            raise RuntimeError("未在导入内容中发现可兼容的 Skill 或 MCP 配置")
+
+        return {"skills": skills, "warnings": warnings}
+
+    @staticmethod
+    def _read_skills_directory(directory_path: str) -> dict[str, Any]:
+        clean_root = str(directory_path or "").strip()
+        root = Path(clean_root)
+        if not clean_root or not root.exists():
+            return {"skills": [], "warnings": ["目录不存在或无法访问"], "scannedCandidates": []}
+        if not root.is_dir():
+            return {"skills": [], "warnings": ["路径不是目录"], "scannedCandidates": []}
+
+        candidates: list[str] = []
+        root_skill_detected = False
+        try:
+            entries = list(root.iterdir())
+        except OSError as e:
+            return {"skills": [], "warnings": [f"目录无法读取：{e}"], "scannedCandidates": []}
+
+        for entry in entries:
+            if entry.is_dir():
+                candidates.append(str(entry))
+                continue
+            if entry.name.lower() == "skill.md":
+                root_skill_detected = True
+
+        if root_skill_detected:
+            candidates.insert(0, clean_root)
+
+        skills: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        for candidate in candidates:
+            try:
+                imported = GloscTools._import_skill_directory_source(candidate)
+                for skill in imported.get("skills", []):
+                    metadata = dict(skill.get("metadata") or {})
+                    metadata["skillDirectory.root"] = clean_root
+                    skill["metadata"] = metadata
+                    skill["ecosystemTags"] = GloscTools._unique_strings(
+                        [*list(skill.get("ecosystemTags") or []), "managed-directory-skill"]
+                    )
+                    skill["warnings"] = GloscTools._unique_strings(list(skill.get("warnings") or []))
+                    skills.append(skill)
+
+                warnings.extend(
+                    [f"{Path(candidate).name or candidate}：{item}" for item in imported.get("warnings", [])]
+                )
+            except Exception as e:
+                warnings.append(f"{Path(candidate).name or candidate}：{e}")
+
+        deduped: dict[str, dict[str, Any]] = {}
+        for skill in skills:
+            deduped[str(skill.get("dedupeKey") or skill.get("id") or uuid.uuid4())] = skill
+
+        return {
+            "skills": list(deduped.values()),
+            "warnings": GloscTools._unique_strings(warnings),
+            "scannedCandidates": candidates,
+        }
+
+    @staticmethod
+    def _normalize_lock_slug(value: str) -> str:
+        return GloscTools._slugify_skill_name(value)
+
+    @staticmethod
+    def _extract_clawhub_lock_entries(raw: Any, fallback_key: str | None = None) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+
+        def append(entry: dict[str, Any]) -> None:
+            slug = GloscTools._normalize_lock_slug(str(entry.get("slug") or ""))
+            if not slug:
+                return
+            existing = next((item for item in out if item.get("slug") == slug), None)
+            if existing:
+                if not existing.get("version") and entry.get("version"):
+                    existing["version"] = entry.get("version")
+                if not existing.get("name") and entry.get("name"):
+                    existing["name"] = entry.get("name")
+                return
+            next_entry: dict[str, Any] = {"slug": slug}
+            if entry.get("version"):
+                next_entry["version"] = entry.get("version")
+            if entry.get("name"):
+                next_entry["name"] = entry.get("name")
+            out.append(next_entry)
+
+        def walk(value: Any, key_hint: str | None = None, depth: int = 0) -> None:
+            if depth > 5 or value is None:
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item, None, depth + 1)
+                return
+            if not isinstance(value, dict):
+                return
+
+            slug_candidate = str(
+                value.get("slug") or value.get("skillSlug") or value.get("name") or key_hint or ""
+            ).strip()
+            version_candidate = str(value.get("version") or value.get("installedVersion") or "").strip()
+            name_candidate = str(value.get("displayName") or value.get("title") or value.get("name") or "").strip()
+
+            if slug_candidate and (version_candidate or name_candidate or value.get("slug")):
+                append(
+                    {
+                        "slug": slug_candidate,
+                        "version": version_candidate or None,
+                        "name": name_candidate or None,
+                    }
+                )
+
+            for key, nested in value.items():
+                walk(nested, str(key), depth + 1)
+
+        walk(raw, fallback_key)
+        return out
+
+    @staticmethod
+    def _read_clawhub_lock(workspace_root: str) -> dict[str, Any]:
+        lock_path = Path(workspace_root) / ".clawhub" / "lock.json"
+        if not lock_path.exists():
+            return {"lockPath": None, "entries": []}
+
+        try:
+            parsed = GloscTools._parse_json_text(GloscTools._decode_text_bytes(lock_path.read_bytes()))
+            return {"lockPath": str(lock_path), "entries": GloscTools._extract_clawhub_lock_entries(parsed)}
+        except Exception:
+            return {"lockPath": str(lock_path), "entries": []}
+
+    @staticmethod
+    def _read_workspace_installed_skills(workspace_root: str) -> dict[str, Any]:
+        clean_root = str(workspace_root or "").strip()
+        if not clean_root:
+            return {"skills": [], "warnings": [], "skillsDir": None, "lockPath": None, "lockEntries": []}
+
+        skills_dir = Path(clean_root) / "skills"
+        lock = GloscTools._read_clawhub_lock(clean_root)
+        if not skills_dir.exists():
+            return {
+                "skills": [],
+                "warnings": ["检测到 .clawhub/lock.json，但当前工作区不存在 skills/ 目录。"] if lock.get("lockPath") else [],
+                "skillsDir": None,
+                "lockPath": lock.get("lockPath"),
+                "lockEntries": lock.get("entries") or [],
+            }
+
+        result = GloscTools._read_skills_directory(str(skills_dir))
+        skills: list[dict[str, Any]] = []
+        lock_entries = list(lock.get("entries") or [])
+
+        for skill in result.get("skills", []):
+            source_label = Path(str(skill.get("source", {}).get("canonical") or skill.get("source", {}).get("original") or "")).name
+            source_slug = GloscTools._normalize_lock_slug(source_label or str(skill.get("slug") or ""))
+            lock_entry = next((entry for entry in lock_entries if entry.get("slug") == source_slug), None)
+            if not lock_entry:
+                lock_entry = next((entry for entry in lock_entries if entry.get("slug") == skill.get("slug")), None)
+
+            metadata = dict(skill.get("metadata") or {})
+            metadata["clawhub.workspaceRoot"] = clean_root
+            if lock_entry and lock_entry.get("version"):
+                metadata["clawhub.version"] = str(lock_entry.get("version"))
+            skill["metadata"] = metadata
+            skill["ecosystemTags"] = GloscTools._unique_strings(
+                [*list(skill.get("ecosystemTags") or []), "workspace-skill", "clawhub-installed"]
+            )
+            skill["warnings"] = GloscTools._unique_strings(list(skill.get("warnings") or []))
+            skills.append(skill)
+
+        deduped: dict[str, dict[str, Any]] = {}
+        for skill in skills:
+            deduped[str(skill.get("dedupeKey") or skill.get("id") or uuid.uuid4())] = skill
+
+        return {
+            "skills": list(deduped.values()),
+            "warnings": result.get("warnings") or [],
+            "skillsDir": str(skills_dir),
+            "lockPath": lock.get("lockPath"),
+            "lockEntries": lock_entries,
+        }
+
+    @staticmethod
+    def read_skills(options: dict[str, Any]) -> dict[str, Any]:
+        mode = str(options.get("mode") or "directory").strip() or "directory"
+        path = str(options.get("path") or "").strip()
+        if mode == "workspace":
+            return GloscTools._read_workspace_installed_skills(path)
+        if mode == "directory":
+            return GloscTools._read_skills_directory(path)
+        raise RuntimeError("mode 仅支持 directory 或 workspace")
 
     @staticmethod
     def parse_7z_output(output: str) -> list[dict[str, Any]]:
